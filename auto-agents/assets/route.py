@@ -165,8 +165,16 @@ def _read_spent_so_far(run_dir: Path) -> float:
 
 def run_stage1(run_dir: Path) -> dict:
     P.check_sentinels(run_dir)
-    P.write_heartbeat(run_dir, stage=1, step="classify")
 
+    # Idempotent re-entry: route.json is immutable. If it exists, return it.
+    route_json = run_dir / "route.json"
+    if route_json.exists():
+        existing = json.loads(route_json.read_text(encoding="utf-8"))
+        P.append_progress(run_dir, stage=1, step="resume", status="ok",
+                          detail=f"route.json exists; reusing class={existing.get('task_class')}")
+        return existing
+
+    P.write_heartbeat(run_dir, stage=1, step="classify")
     task = yaml_io.load_path(run_dir / "task.yaml")
     prompt = task.get("prompt", "")
     host = task["host"]
@@ -233,7 +241,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True, type=Path)
     args = ap.parse_args(argv)
-    route = run_stage1(args.run_dir)
+    try:
+        route = run_stage1(args.run_dir)
+    except P.StopRequested as e:
+        P.append_progress(args.run_dir, stage=1, step="stop_sentinel",
+                          status="stopped-by-user", detail=str(e))
+        return 2
     print(json.dumps(route, indent=2, ensure_ascii=False))
     return 1 if route.get("escalations") else 0
 

@@ -43,14 +43,18 @@ def _read_prompt(run_dir: Path) -> str:
 
 
 def _archive_prior_attempt(agent_dir: Path) -> None:
-    """If agent_dir has a result.md from a prior failed attempt, move it under
-    attempts/<N>/ so resume produces a fresh result."""
+    """If agent_dir has artifacts from a prior failed/crashed attempt, move
+    them under attempts/<N>/ so the next run produces a fresh result.
+    Picks the smallest N where attempts/<N>/ doesn't exist — survives
+    crashes that left a half-formed directory."""
     meta = agent_dir / "meta.json"
     if not meta.exists():
         return
     attempts_dir = agent_dir / "attempts"
     attempts_dir.mkdir(exist_ok=True)
-    n = len(list(attempts_dir.iterdir())) + 1
+    n = 1
+    while (attempts_dir / str(n)).exists():
+        n += 1
     target = attempts_dir / str(n)
     target.mkdir()
     for name in ("invocation.md", "stdout.log", "stderr.log",
@@ -118,9 +122,9 @@ def _dispatch_subprocess(run_dir: Path, agent: str, prompt: str) -> dict:
     env_overrides = {"AUTO_AGENTS_DEPTH": str(depth + 1)}
     result = mod.invoke(prompt, env_overrides=env_overrides)
 
-    # write raw streams + extracted result
-    (agent_dir / "stdout.log").write_text(result["stdout"], encoding="utf-8")
-    (agent_dir / "stderr.log").write_text(result["stderr"], encoding="utf-8")
+    # write raw streams + extracted result (atomic per integrity rule #7)
+    P.atomic_write_text(agent_dir / "stdout.log", result["stdout"])
+    P.atomic_write_text(agent_dir / "stderr.log", result["stderr"])
     answer = mod.extract_answer(result["stdout"]) if result["exit_code"] == 0 else ""
     P.atomic_write_text(agent_dir / "result.md", answer)
 
@@ -231,13 +235,25 @@ def run_stage2(run_dir: Path) -> dict:
     for agent, mode in route["agent_modes"].items():
         agent_dir = run_dir / "agents" / agent
 
-        # resume: skip if already ok
+        # resume: skip if already ok AND result.md is present and non-empty.
+        # ('ok' meta.json without result.md means a partial earlier write —
+        # re-dispatch rather than trusting the bogus status.)
         prior = _meta_status(agent_dir)
-        if prior == "ok":
+        result_md = agent_dir / "result.md"
+        result_present = result_md.exists() and result_md.read_text(
+            encoding="utf-8").strip() != ""
+        if prior == "ok" and result_present:
             P.append_progress(run_dir, stage=2, step=f"dispatch:{agent}",
-                              status="skipped", detail="already ok")
+                              status="skipped", detail="already ok + result.md present")
             results[agent] = {"status": "ok", "skipped": True}
             continue
+        if prior == "ok" and not result_present:
+            P.append_progress(
+                run_dir, stage=2, step=f"dispatch:{agent}",
+                status="warning",
+                detail="meta.json ok but result.md missing/empty — re-dispatching",
+            )
+            _archive_prior_attempt(agent_dir)
 
         # resume: archive prior failed / interrupted attempt
         # 'running' means we crashed mid-call — could be already charged; we
@@ -287,9 +303,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True, type=Path)
     args = ap.parse_args(argv)
-    out = run_stage2(args.run_dir)
+    try:
+        out = run_stage2(args.run_dir)
+    except P.StopRequested as e:
+        P.append_progress(args.run_dir, stage=2, step="stop_sentinel",
+                          status="stopped-by-user", detail=str(e))
+        return 2
     print(json.dumps(out, indent=2, ensure_ascii=False))
-    return 0 if out.get("status") == "ok" else 1
+    return 0 if out.get("status") in ("ok", "pending-inline") else 1
 
 
 if __name__ == "__main__":

@@ -305,7 +305,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True, type=Path)
     args = ap.parse_args(argv)
-    out = run_stage3(args.run_dir)
+    try:
+        out = run_stage3(args.run_dir)
+    except P.StopRequested as e:
+        P.append_progress(args.run_dir, stage=3, step="stop_sentinel",
+                          status="stopped-by-user", detail=str(e))
+        return 2
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0 if out.get("status") in ("ok", "pending-host", "pending-round2") else 1
 

@@ -37,6 +37,17 @@ def run_stage0(run_dir: Path, prompt: str, *, mode: str = "auto",
                host_override: str | None = None) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     P.check_sentinels(run_dir)
+
+    # Idempotent re-entry: task.yaml is immutable. If it exists, load and
+    # return — do NOT rewrite (would clobber created_utc and any user edits).
+    task_yaml = run_dir / "task.yaml"
+    if task_yaml.exists():
+        existing = yaml_io.load_path(task_yaml)
+        P.append_progress(run_dir, stage=0, step="resume",
+                          status="ok",
+                          detail=f"task.yaml exists; reusing host={existing.get('host')}")
+        return existing
+
     P.write_heartbeat(run_dir, stage=0, step="host_detect")
 
     # --- host detection ------------------------------------------------------
@@ -112,15 +123,18 @@ def main(argv: list[str] | None = None) -> int:
                     choices=[None, "claude", "codex", "opencode"])
     args = ap.parse_args(argv)
     prompt = args.prompt_file.read_text(encoding="utf-8")
-    task = run_stage0(
-        run_dir=args.run_dir,
-        prompt=prompt,
-        mode=args.mode,
-        per_call_cap_usd=args.per_call_cap_usd,
-        total_cap_usd=args.total_cap_usd,
-        deadline_utc=args.deadline_utc,
-        host_override=args.host_override,
-    )
+    try:
+        task = run_stage0(
+            run_dir=args.run_dir, prompt=prompt, mode=args.mode,
+            per_call_cap_usd=args.per_call_cap_usd,
+            total_cap_usd=args.total_cap_usd,
+            deadline_utc=args.deadline_utc,
+            host_override=args.host_override,
+        )
+    except P.StopRequested as e:
+        P.append_progress(args.run_dir, stage=0, step="stop_sentinel",
+                          status="stopped-by-user", detail=str(e))
+        return 2
     print(json.dumps(task, indent=2, ensure_ascii=False))
     return 0
 
