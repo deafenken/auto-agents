@@ -4,10 +4,23 @@ Each subprocess worker gets AUTO_AGENTS_DEPTH = parent+1 in its env so any
 recursive auto-agents invocation will refuse at Stage 0 (recursion guard).
 
 The host agent (route.agent_modes[host] == "inline") does NOT get spawned
-here. Instead its `agents/<host>/invocation.md` is written and a placeholder
-`meta.json` is written with status="pending". The SKILL.md prompt instructs
-the host to fill `agents/<host>/result.md` itself, then re-invoke dispatch.py
-which will mark host status="ok" once result.md is non-empty.
+here. The two-pass flow:
+
+  Pass 1: invocation.md is written and meta.json is created with
+          status="pending". run_stage2 returns status="pending-inline".
+  Pass 2: after the host model fills agents/<host>/result.md, re-running
+          dispatch detects the non-empty result.md, atomically flips
+          meta.json{status=ok}, and appends an audit row. run_stage2 then
+          returns status="ok" and synthesis can proceed.
+
+Subprocess workers go through _dispatch_subprocess: budget.gate refuses
+before spending, a provisional meta.json{status=running} closes the
+crash-mid-call window, then the call runs and meta.json is rewritten with
+the final status + audit row appended. Resume of an interrupted call
+archives the prior attempt under agents/<name>/attempts/<N>/ and re-tries.
+
+Dry-run mode (task.yaml: mode == "dry-run"): subprocess agents get
+invocation.md + meta.json{status="dry-run"} but are NOT spawned.
 """
 from __future__ import annotations
 

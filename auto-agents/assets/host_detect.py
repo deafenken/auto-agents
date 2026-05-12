@@ -76,23 +76,28 @@ def _proc_name(pid: int) -> str | None:
         return None
 
 
-def _ps_chain_tier() -> tuple[str | None, list[tuple[int, str]]]:
-    """Walk parent chain; return (host_if_found, chain_for_audit)."""
+def _ps_chain_tier() -> tuple[str | None, list[tuple[int, str]], list[str]]:
+    """Walk parent chain; return (closest_host, chain_for_audit, all_hits).
+    all_hits has >1 entry only when the chain contains nested host CLIs —
+    caller should log a warning in that case (nested invocation)."""
     targets = set(ENV_FAMILIES)
     chain: list[tuple[int, str]] = []
+    all_hits: list[str] = []
+    closest: str | None = None
     pid = os.getppid()
     for _ in range(PS_CHAIN_DEPTH_CAP):
         if pid is None or pid <= 1:
             break
         name = _proc_name(pid) or ""
         chain.append((pid, name))
-        # match: process basename contains one of the target names
         hits = [t for t in targets if t in name.lower()]
-        if len(hits) >= 1:
-            # closest match (first hit on the way up) wins
-            return hits[0], chain
+        for h in hits:
+            if h not in all_hits:
+                all_hits.append(h)
+        if closest is None and hits:
+            closest = hits[0]
         pid = _parent_pid(pid)
-    return None, chain
+    return closest, chain, all_hits
 
 
 def _cache_tier() -> tuple[str | None, str | None]:
@@ -140,7 +145,16 @@ def write_cache(host: str, detection: str) -> None:
 
 
 def detect() -> dict:
-    depth = int(os.environ.get("AUTO_AGENTS_DEPTH", "0") or "0")
+    raw_depth = os.environ.get("AUTO_AGENTS_DEPTH", "0") or "0"
+    try:
+        depth = int(raw_depth)
+    except (TypeError, ValueError):
+        # Defensive: hostile / corrupted env var → treat as nested to be safe.
+        return {
+            "host": None, "detection": None, "candidates": [],
+            "refused": True,
+            "reason": f"AUTO_AGENTS_DEPTH={raw_depth!r} is not an integer",
+        }
     if depth >= 1:
         return {
             "host": None, "detection": None, "candidates": [],
@@ -164,12 +178,20 @@ def detect() -> dict:
         }
 
     # Tier 2 — parent process chain
-    host, chain = _ps_chain_tier()
+    host, chain, all_hits = _ps_chain_tier()
     if host is not None:
-        return {
+        result = {
             "host": host, "detection": f"ps-chain:{host}",
             "candidates": [name for _, name in chain], "refused": False,
         }
+        if len(all_hits) > 1:
+            # Nested host CLIs in the chain → suspicious. We pick the closest
+            # but flag it so the caller can write a progress.jsonl warning.
+            result["warning"] = (
+                f"multiple host CLIs in parent chain: {all_hits}; "
+                f"using closest={host} but check for nested invocation"
+            )
+        return result
 
     # Tier 3a — cache
     host, prior = _cache_tier()

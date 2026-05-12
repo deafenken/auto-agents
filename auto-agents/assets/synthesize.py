@@ -104,8 +104,11 @@ def synth_inline(run_dir: Path, route: dict) -> str:
                 + _contributors_block(run_dir, agents)
                 + "\n## Synthesis method: inline (failed)\n\n"
                 + _audit_block(run_dir))
+    # Integrity rule #2: even single-agent answers must attribute the source
+    # so the reader can trace the claim back to a raw output file.
     return (
         "# Answer\n\n"
+        f"_Source: `{a}` — verbatim from `agents/{a}/result.md`._\n\n"
         + text.rstrip() + "\n\n---\n\n"
         + _contributors_block(run_dir, agents)
         + "\n## Synthesis method: inline\n\n"
@@ -270,6 +273,7 @@ def run_stage3(run_dir: Path) -> dict:
         final, tally = synth_vote(run_dir, route)
         _write_method_md(run_dir, "vote",
                          f"Tally: `synthesis/intermediate/vote-tally.json`")
+        (run_dir / "synthesis" / "intermediate").mkdir(parents=True, exist_ok=True)
         P.atomic_write_json(run_dir / "synthesis" / "intermediate" /
                             "vote-tally.json", tally)
         P.atomic_write_text(run_dir / "synthesis" / "final.md", final)
