@@ -56,17 +56,24 @@ def run_stage0(run_dir: Path, prompt: str, *, mode: str = "auto",
                       status="ok", detail=f"host={host} via {detection}")
 
     # --- worker auth check ---------------------------------------------------
+    # `--version` checks the binary is present and runnable; it does NOT
+    # confirm credentials. For claude/codex/opencode the first real call is
+    # what surfaces auth errors. We record auth_checked="deferred" so the
+    # contract is honest (per integrity-rules.md §4 "auth check upfront").
     P.write_heartbeat(run_dir, stage=0, step="auth_check")
     workers_available: dict[str, bool] = {}
     workers_detail: dict[str, str] = {}
+    workers_auth_checked: dict[str, str] = {}
     for name, mod in WORKERS.items():
         if name == host:
             workers_available[name] = True
             workers_detail[name] = "host (inline)"
+            workers_auth_checked[name] = "n/a"
             continue
         ok, detail = mod.version_check()
         workers_available[name] = ok
         workers_detail[name] = detail
+        workers_auth_checked[name] = "binary-ok-auth-deferred" if ok else "binary-failed"
     P.append_progress(
         run_dir, stage=0, step="auth_check", status="ok",
         detail=" ".join(f"{k}:{'ok' if v else 'unavailable'}"
@@ -86,6 +93,7 @@ def run_stage0(run_dir: Path, prompt: str, *, mode: str = "auto",
         "deadline_utc": deadline_utc,
         "workers_available": workers_available,
         "workers_detail": workers_detail,
+        "workers_auth_checked": workers_auth_checked,
     }
     P.atomic_write_text(run_dir / "task.yaml", yaml_io.dump(task))
     P.append_progress(run_dir, stage=0, step="write_task_yaml", status="ok")

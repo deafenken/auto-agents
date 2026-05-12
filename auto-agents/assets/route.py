@@ -142,6 +142,27 @@ def _select_agents(task_class: str, host: str, available: dict[str, bool],
             escalations)
 
 
+def _read_spent_so_far(run_dir: Path) -> float:
+    """Sum cost_actual_usd from audit.jsonl (missing/null/malformed → 0)."""
+    audit = run_dir / "audit.jsonl"
+    if not audit.exists():
+        return 0.0
+    total = 0.0
+    for line in audit.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        v = row.get("cost_actual_usd")
+        if v is None:
+            continue
+        try:
+            total += float(v)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def run_stage1(run_dir: Path) -> dict:
     P.check_sentinels(run_dir)
     P.write_heartbeat(run_dir, stage=1, step="classify")
@@ -162,16 +183,30 @@ def run_stage1(run_dir: Path) -> dict:
         task_class, host, available, mode,
     )
 
+    total_cap = float(task.get("total_cap_usd", 2.00))
+    spent_so_far = _read_spent_so_far(run_dir)
+    # ×2 headroom per integrity rule #3
+    per_agent_est_x2 = {
+        a: COST_ESTIMATE_USD.get(a, 0.0) * 2.0
+        for a, m in agent_modes.items() if m == "subprocess"
+    }
+    over_per_call = [a for a, e in per_agent_est_x2.items() if e > per_call_cap]
+    if over_per_call:
+        escalations.append(
+            "per-call cap ${:.2f} exceeded by: {}".format(
+                per_call_cap,
+                ", ".join(f"{a}(est×2=${per_agent_est_x2[a]:.2f})" for a in over_per_call),
+            )
+        )
+    batch_total_x2 = sum(per_agent_est_x2.values())
     cost_estimate = sum(
         COST_ESTIMATE_USD.get(a, 0.0)
-        for a, m in agent_modes.items() if m == "subprocess"
+        for a in per_agent_est_x2  # raw estimate (no ×2) recorded in route.json
     )
-    if cost_estimate > per_call_cap * len(
-        [m for m in agent_modes.values() if m == "subprocess"] or [1]
-    ):
+    if spent_so_far + batch_total_x2 > total_cap:
         escalations.append(
-            f"estimated cost ${cost_estimate:.2f} exceeds per-call cap "
-            f"${per_call_cap:.2f}"
+            f"total cap ${total_cap:.2f} exceeded: spent ${spent_so_far:.2f} + "
+            f"batch est×2 ${batch_total_x2:.2f} > cap"
         )
 
     route = {

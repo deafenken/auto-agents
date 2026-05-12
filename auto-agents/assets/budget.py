@@ -36,18 +36,28 @@ def _read_yaml_floats(task_path: Path) -> tuple[float, float]:
 
 
 def total_spent(run_dir: Path) -> float:
+    """Sum cost_actual_usd from audit.jsonl.
+    Tolerates missing file, malformed JSON rows, null/non-numeric values
+    (all silently skipped) — the audit log is append-only and may contain
+    partial rows from interrupted writes."""
     audit = run_dir / "audit.jsonl"
     if not audit.exists():
         return 0.0
     total = 0.0
     for line in audit.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             continue
         v = row.get("cost_actual_usd")
-        if v is not None:
+        if v is None:
+            continue
+        try:
             total += float(v)
+        except (TypeError, ValueError):
+            continue
     return total
 
 
@@ -78,7 +88,9 @@ def gate(run_dir: Path, *, estimated_next_call_usd: float) -> dict:
 def reconcile(run_dir: Path) -> dict:
     """Compare per-agent estimates (cost_est_usd in meta.json) against actuals
     in audit.jsonl. Returns a summary; flags agents whose actuals exceed
-    estimate by >2× as 'estimate-stale'."""
+    estimate by >2× as 'estimate-stale' and appends a progress.jsonl warning
+    row when any are stale (so the orchestrator can decide to pause)."""
+    import progress as _P  # local import to avoid cycle
     agents_dir = run_dir / "agents"
     if not agents_dir.exists():
         return {"agents": {}, "stale": []}
@@ -92,13 +104,21 @@ def reconcile(run_dir: Path) -> dict:
             continue
         try:
             meta = json.loads(meta_p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, OSError):
             continue
         est = meta.get("cost_est_usd")
         act = meta.get("cost_actual_usd")
         summary[sub.name] = {"est": est, "actual": act}
-        if est and act and act > 2 * est:
-            stale.append(sub.name)
+        try:
+            if est is not None and act is not None and float(act) > 2 * float(est):
+                stale.append(sub.name)
+        except (TypeError, ValueError):
+            continue
+    if stale:
+        _P.append_progress(
+            run_dir, stage=2, step="budget_reconcile", status="warning",
+            detail=f"estimate-stale agents (actual > 2× est): {stale}",
+        )
     return {"agents": summary, "stale": stale}
 
 
