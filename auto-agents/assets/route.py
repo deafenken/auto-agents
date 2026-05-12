@@ -58,6 +58,9 @@ def classify(prompt: str) -> tuple[str, str]:
     return "quick-qa", "no keyword matched"
 
 
+KNOWN_MODES = {"auto", "multi", "dry-run"}
+
+
 def _select_agents(task_class: str, host: str, available: dict[str, bool],
                    mode: str) -> tuple[list[str], dict[str, str], str, list[str]]:
     """Returns (agents, agent_modes, synthesis_method, escalations)."""
@@ -65,6 +68,14 @@ def _select_agents(task_class: str, host: str, available: dict[str, bool],
     cls = TASK_CLASSES[task_class]
     primary = cls["primary"]
     synthesis = cls["synthesis"]
+
+    # Validate mode — reject anything we don't recognize (no silent fallback).
+    if mode not in KNOWN_MODES and not mode.startswith("single:"):
+        escalations.append(
+            f"unknown mode '{mode}' — expected one of: "
+            f"{sorted(KNOWN_MODES)} or 'single:<agent>'"
+        )
+        return [], {}, "inline", escalations
 
     if mode.startswith("single:"):
         only = mode.split(":", 1)[1]
@@ -80,19 +91,31 @@ def _select_agents(task_class: str, host: str, available: dict[str, bool],
                 escalations)
 
     if mode == "multi":
-        agents = [a for a in ("claude", "codex", "opencode") if available.get(a, False)]
+        all_three = ("claude", "codex", "opencode")
+        agents = [a for a in all_three if available.get(a, False)]
+        if len(agents) < 3:
+            missing = [a for a in all_three if not available.get(a, False)]
+            escalations.append(
+                f"mode=multi requested all three agents but missing: {missing} "
+                "(integrity rule #1: no silent agent swap)"
+            )
         modes = {a: "inline" if a == host else "subprocess" for a in agents}
         return agents, modes, "meta-synth" if len(agents) > 1 else "inline", escalations
 
-    # mode == "auto" (or anything else): use matrix
+    # mode == "auto" or "dry-run": use matrix (dry-run differs only in Stage 2)
     if primary == ["__host__"]:
         return [host], {host: "inline"}, "inline", escalations
 
     if task_class in ("idea", "debate"):
-        # fan out to all three available
         agents = [a for a in primary if available.get(a, False)]
         if host not in agents and available.get(host, False):
             agents.insert(0, host)
+        missing = [a for a in primary if not available.get(a, False) and a != host]
+        if missing:
+            escalations.append(
+                f"task_class={task_class} wants all three agents but missing: "
+                f"{missing} (integrity rule #1)"
+            )
         modes = {a: "inline" if a == host else "subprocess" for a in agents}
         return agents, modes, synthesis if len(agents) > 1 else "inline", escalations
 

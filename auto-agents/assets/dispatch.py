@@ -17,11 +17,15 @@ import os
 import sys
 from pathlib import Path
 
+import budget
 import invoke_claude
 import invoke_codex
 import invoke_opencode
 import progress as P
 import yaml_io
+
+# Mirrors route.COST_ESTIMATE_USD — kept here to break the import cycle.
+COST_ESTIMATE_USD = {"claude": 0.20, "codex": 0.12, "opencode": 0.05}
 
 WORKERS = {
     "claude":   invoke_claude,
@@ -71,6 +75,20 @@ def _dispatch_subprocess(run_dir: Path, agent: str, prompt: str) -> dict:
     agent_dir = run_dir / "agents" / agent
     agent_dir.mkdir(parents=True, exist_ok=True)
 
+    # Budget gate (per-call + total) — refuse before spending.
+    est = COST_ESTIMATE_USD.get(agent, 0.0) * 2.0  # ×2 headroom per integrity rule
+    decision = budget.gate(run_dir, estimated_next_call_usd=est)
+    if not decision["ok"]:
+        P.append_progress(
+            run_dir, stage=2, step=f"dispatch:{agent}", status="blocked-budget",
+            detail=" | ".join(decision["reasons"]),
+        )
+        return {
+            "agent": agent, "status": "blocked",
+            "reason": "budget gate refused",
+            "decision": decision,
+        }
+
     # invocation.md — reproducible record
     inv = (
         f"# Invocation for `{agent}`\n\n"
@@ -80,8 +98,21 @@ def _dispatch_subprocess(run_dir: Path, agent: str, prompt: str) -> dict:
     )
     P.atomic_write_text(agent_dir / "invocation.md", inv)
 
-    # spawn
-    P.append_progress(run_dir, stage=2, step=f"dispatch:{agent}", status="started")
+    # Provisional meta.json BEFORE the call — closes the crash window.
+    provisional = {
+        "agent": agent, "status": "running",
+        "exit_code": None, "ts_started_utc": P.utc_now_iso(),
+        "ts_ended_utc": None, "duration_s": None,
+        "tokens_in": None, "tokens_out": None,
+        "cost_est_usd": est, "cost_actual_usd": None,
+        "invocation_cmd": (os.environ.get(f"AUTO_AGENTS_{agent.upper()}_CMD",
+                                          mod.DEFAULT_CMD) + " <prompt>"),
+        "attempts": 1,
+    }
+    P.atomic_write_json(agent_dir / "meta.json", provisional)
+
+    P.append_progress(run_dir, stage=2, step=f"dispatch:{agent}", status="started",
+                      detail=f"budget ok (est=${est:.4f})")
     P.write_heartbeat(run_dir, stage=2, step=f"dispatch:{agent}")
     depth = int(os.environ.get("AUTO_AGENTS_DEPTH", "0") or "0")
     env_overrides = {"AUTO_AGENTS_DEPTH": str(depth + 1)}
@@ -121,13 +152,45 @@ def _dispatch_subprocess(run_dir: Path, agent: str, prompt: str) -> dict:
 
 
 def _stage_inline_host(run_dir: Path, host: str, prompt: str) -> dict:
-    """Write the invocation but leave result.md to be filled by the host model."""
+    """Inline-host two-pass:
+       Pass 1: no result.md yet → write invocation.md + meta.json{status=pending}.
+       Pass 2 (re-run after host writes result.md): if result.md is non-empty,
+               flip meta.json{status=ok}, write audit row, return.
+    The host model is expected to fill result.md between pass 1 and pass 2."""
     agent_dir = run_dir / "agents" / host
     agent_dir.mkdir(parents=True, exist_ok=True)
+    result_path = agent_dir / "result.md"
+    meta_path = agent_dir / "meta.json"
+
+    # Pass 2: host has filled in result.md → complete the record.
+    if result_path.exists() and result_path.read_text(encoding="utf-8").strip():
+        # Read existing meta to preserve ts_started_utc
+        prior = json.loads(meta_path.read_text(encoding="utf-8")) \
+                if meta_path.exists() else {}
+        meta = {
+            "agent": host, "status": "ok",
+            "exit_code": 0,
+            "ts_started_utc": prior.get("ts_started_utc", P.utc_now_iso()),
+            "ts_ended_utc": P.utc_now_iso(),
+            "duration_s": None, "tokens_in": None, "tokens_out": None,
+            "cost_est_usd": 0.0, "cost_actual_usd": 0.0,
+            "invocation_cmd": "inline", "attempts": prior.get("attempts", 1),
+        }
+        P.atomic_write_json(meta_path, meta)
+        P.append_audit(run_dir, agent=host, attempt=meta["attempts"],
+                       exit_code=0, duration_s=0.0, tokens_in=None,
+                       tokens_out=None, cost_actual_usd=0.0)
+        P.append_progress(run_dir, stage=2, step=f"dispatch:{host}",
+                          status="ok",
+                          detail="inline host result.md present; flipped to ok")
+        return meta
+
+    # Pass 1: stage the invocation, leave status=pending.
     inv = (
         f"# Inline invocation for host `{host}`\n\n"
-        f"The host agent should write its answer to `result.md` in this folder,\n"
-        f"then update `meta.json: status` to `ok` and re-run dispatch.py.\n\n"
+        f"The host agent should write its answer to `result.md` in this folder.\n"
+        f"After result.md is written, re-run dispatch.py — the script will flip\n"
+        f"meta.json status to `ok` automatically.\n\n"
         f"## Prompt\n\n```\n{prompt}\n```\n"
     )
     P.atomic_write_text(agent_dir / "invocation.md", inv)
@@ -136,10 +199,10 @@ def _stage_inline_host(run_dir: Path, host: str, prompt: str) -> dict:
         "exit_code": None, "ts_started_utc": P.utc_now_iso(),
         "ts_ended_utc": None, "duration_s": None,
         "tokens_in": None, "tokens_out": None,
-        "cost_est_usd": None, "cost_actual_usd": None,
+        "cost_est_usd": 0.0, "cost_actual_usd": None,
         "invocation_cmd": "inline", "attempts": 1,
     }
-    P.atomic_write_json(agent_dir / "meta.json", meta)
+    P.atomic_write_json(meta_path, meta)
     P.append_progress(run_dir, stage=2, step=f"dispatch:{host}",
                       status="pending-inline",
                       detail="host writes result.md, then re-run dispatch")
@@ -158,6 +221,13 @@ def run_stage2(run_dir: Path) -> dict:
     prompt = _read_prompt(run_dir)
     results: dict[str, dict] = {}
 
+    task = yaml_io.load_path(run_dir / "task.yaml")
+    dry_run = task.get("mode") == "dry-run"
+    if dry_run:
+        P.append_progress(run_dir, stage=2, step="dry-run",
+                          status="ok",
+                          detail="writing invocations only; no subprocess spawn")
+
     for agent, mode in route["agent_modes"].items():
         agent_dir = run_dir / "agents" / agent
 
@@ -169,15 +239,47 @@ def run_stage2(run_dir: Path) -> dict:
             results[agent] = {"status": "ok", "skipped": True}
             continue
 
-        # resume: archive prior failed attempt
-        if prior in ("failed", "timed-out"):
+        # resume: archive prior failed / interrupted attempt
+        # 'running' means we crashed mid-call — could be already charged; we
+        # still retry, but flag it loudly in progress.jsonl so the user can
+        # check audit.jsonl for a double-charge.
+        if prior in ("failed", "timed-out", "running"):
+            if prior == "running":
+                P.append_progress(
+                    run_dir, stage=2, step=f"dispatch:{agent}",
+                    status="resumed-after-crash",
+                    detail="prior attempt status=running; possible mid-call "
+                           "crash — check audit.jsonl for double charge",
+                )
             _archive_prior_attempt(agent_dir)
 
         if mode == "inline":
             results[agent] = _stage_inline_host(run_dir, agent, prompt)
+        elif dry_run:
+            # dry-run: write invocation.md but do NOT spawn. Mark as
+            # 'dry-run' so synthesize.py knows there is nothing to merge.
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            inv = (
+                f"# DRY-RUN invocation for `{agent}` (not spawned)\n\n"
+                f"Cmd would be: `{os.environ.get(f'AUTO_AGENTS_{agent.upper()}_CMD', WORKERS[agent].DEFAULT_CMD)}` <prompt>\n\n"
+                f"## Prompt\n\n```\n{prompt}\n```\n"
+            )
+            P.atomic_write_text(agent_dir / "invocation.md", inv)
+            P.atomic_write_json(agent_dir / "meta.json",
+                                {"agent": agent, "status": "dry-run",
+                                 "invocation_cmd": "dry-run", "attempts": 0})
+            P.append_progress(run_dir, stage=2, step=f"dispatch:{agent}",
+                              status="dry-run",
+                              detail="invocation.md written; no subprocess")
+            results[agent] = {"agent": agent, "status": "dry-run"}
         else:
             results[agent] = _dispatch_subprocess(run_dir, agent, prompt)
 
+    # If any agent (inline or subprocess) is still pending, Stage 3 must wait.
+    statuses = [r.get("status") for r in results.values()]
+    if "pending" in statuses:
+        return {"status": "pending-inline", "results": results,
+                "reason": "host must write result.md, then re-run dispatch"}
     return {"status": "ok", "results": results}
 
 

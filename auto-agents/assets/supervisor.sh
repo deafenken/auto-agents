@@ -93,16 +93,6 @@ heartbeat_age() {
   echo $(( $(date -u +%s) - hb_epoch ))
 }
 
-run_inner_once() {
-  # Run route → dispatch → synthesize in sequence. Each script is idempotent
-  # and reads disk state, so a crash mid-pass is recoverable on the next pass.
-  cd "$SKILL_ASSETS"
-  python3 route.py --run-dir "$RUN_DIR" || return $?
-  python3 dispatch.py --run-dir "$RUN_DIR" || return $?
-  python3 synthesize.py --run-dir "$RUN_DIR" || return $?
-  return 0
-}
-
 restart=0
 while (( restart < MAX_RESTARTS )); do
   if ! check_sentinels; then
@@ -113,8 +103,20 @@ while (( restart < MAX_RESTARTS )); do
 
   log "starting inner pass (restart=$restart)"
   rc=0
-  ( timeout "$INNER_TIMEOUT_SEC" bash -c 'run_inner_once; echo $? > "$0".rc' \
-      "$RUN_DIR/.inner" ) &
+  INNER_RC_FILE="$RUN_DIR/.inner.rc"
+  rm -f "$INNER_RC_FILE"
+  # Inline pipeline inside `bash -c` (shell functions aren't inherited unless
+  # exported). Each script is idempotent — a mid-pass crash resumes cleanly.
+  (
+    timeout "$INNER_TIMEOUT_SEC" bash -c "
+      set -e
+      cd '$SKILL_ASSETS'
+      python3 route.py --run-dir '$RUN_DIR' &&
+      python3 dispatch.py --run-dir '$RUN_DIR' &&
+      python3 synthesize.py --run-dir '$RUN_DIR'
+    "
+    echo $? > "$INNER_RC_FILE"
+  ) &
   inner_pid=$!
 
   # Watchdog: poll heartbeat
