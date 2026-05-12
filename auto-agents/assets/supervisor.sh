@@ -113,7 +113,8 @@ while (( restart < MAX_RESTARTS )); do
       cd '$SKILL_ASSETS'
       python3 route.py --run-dir '$RUN_DIR' &&
       python3 dispatch.py --run-dir '$RUN_DIR' &&
-      python3 synthesize.py --run-dir '$RUN_DIR'
+      python3 synthesize.py --run-dir '$RUN_DIR' &&
+      python3 handoff.py --run-dir '$RUN_DIR'
     "
     echo $? > "$INNER_RC_FILE"
   ) &

@@ -40,10 +40,11 @@ runs/<task_id>/
 ├── synthesis/
 │   ├── method.md                     # which synthesis path: vote | debate | meta-synth | inline
 │   ├── intermediate/                 # synthesis-method-specific scratch
-│   │   ├── debate-round-1.md         # for debate: per-round positions
-│   │   ├── debate-round-2.md
-│   │   ├── vote-tally.json           # for vote: agent → answer label
-│   │   └── meta-synth-input.md       # for meta-synth: concatenated worker outputs
+│   │   ├── debate-round-1.md         # for debate: round-1 positions (always written)
+│   │   ├── debate-round-2.md         # for debate: round-2 rebuttals (v2 — round-2 dispatch not yet wired)
+│   │   ├── vote-tally.json           # for vote: labels + tally + winner
+│   │   ├── meta-synth-input.md       # for meta-synth: concatenated worker outputs
+│   │   └── host-instructions.md      # for meta-synth: how the host should write final.md
 │   └── final.md                      # the one answer that gets returned
 │
 └── hand_off.md                       # 3-paragraph user-facing summary
@@ -68,9 +69,22 @@ workers_available:                   # filled by Stage 0 auth_check
   claude: true
   codex: true
   opencode: false                    # e.g. binary missing or no auth
+workers_detail:                      # human-readable reason per worker
+  claude: "host (inline)"
+  codex: "codex-cli 0.130.0"
+  opencode: "binary-missing"
+workers_auth_checked:                # honesty about what we actually verified
+  claude: "n/a"                      # host doesn't need check
+  codex: "binary-ok-auth-deferred"   # --version succeeded; credentials NOT verified
+  opencode: "binary-failed"          # binary missing or --version exit ≠ 0
 ```
 
-### `route.json` (Stage 1 writes)
+`workers_auth_checked` records what Stage 0 actually proved. For all three
+CLIs `--version` does NOT exercise credentials, so a binary-ok worker is
+recorded `auth-deferred` (first real call surfaces an auth error — at most
+one wasted call per integrity rule #4).
+
+### `route.json` (Stage 1 writes; immutable after first write)
 
 ```json
 {
@@ -80,9 +94,16 @@ workers_available:                   # filled by Stage 0 auth_check
   "agent_modes": {"claude": "subprocess", "codex": "subprocess", "opencode": "subprocess"},
   "synthesis_method": "meta-synth",
   "cost_estimate_usd": 0.45,
-  "inline_host_used": false
+  "inline_host_used": false,
+  "escalations": []
 }
 ```
+
+`escalations` is a list of human-readable strings; if non-empty, Stage 2
+refuses to proceed until they are resolved (per integrity rule #1).
+Examples: `"per-call cap $0.10 exceeded by: claude(est×2=$0.40)"`,
+`"task_class=idea wants all three agents but missing: ['opencode']"`,
+`"unknown mode 'foo'"`.
 
 When the host answers inline:
 
@@ -118,6 +139,11 @@ One row per CLI call (successful or failed):
 {"ts_utc":"2026-05-12T16:40:31Z","agent":"claude","attempt":1,"exit_code":0,"duration_s":28.4,"tokens_in":3210,"tokens_out":1402,"cost_actual_usd":0.18}
 ```
 
+`tokens_in` / `tokens_out` / `cost_actual_usd` are `null` when the CLI
+wrapper cannot extract the value from stdout. Budget reconciliation treats
+null as 0 (does not count). Malformed JSON rows are silently skipped — the
+log is append-only and partial rows from interrupted writes are possible.
+
 ### `.heartbeat` (overwritten each micro-step)
 
 ```yaml
@@ -148,7 +174,23 @@ The user can `cat runs/<task_id>/.heartbeat` to peek. The supervisor watches its
 }
 ```
 
-`status` ∈ `{pending, ok, failed, timed-out}`. Resume re-dispatches anything not `ok`.
+`status` ∈ `{pending, running, ok, failed, timed-out, dry-run, blocked}`.
+
+- `pending` — inline host has not yet written result.md.
+- `running` — subprocess started but completion not yet recorded (crash window flag).
+- `ok` — completed; result.md present; audit row written.
+- `failed` / `timed-out` — completion recorded with non-zero exit.
+- `dry-run` — invocation.md written, no subprocess spawned (mode=dry-run).
+- `blocked` — budget gate or escalation refused this call.
+
+Resume re-dispatches anything not `ok` or `dry-run` (after archiving the
+old artifacts under `agents/<name>/attempts/<N>/`). `running` on resume is
+flagged in `progress.jsonl` as a possible mid-call crash; check
+`audit.jsonl` for a double-charge.
+
+`cost_est_usd` / `cost_actual_usd` / `tokens_in` / `tokens_out` may be
+`null` when the CLI wrapper cannot extract the value. Budget reconciliation
+treats null as "skip" (does not count toward spent total).
 
 ### `synthesis/final.md`
 

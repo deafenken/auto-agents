@@ -38,6 +38,14 @@ Write `synthesis/intermediate/vote-tally.json`:
 
 Two-round structured debate, host-moderated. Used when adversarial perspective is the point.
 
+> **v1 status:** `synthesize.py:synth_debate_prepare` writes
+> `synthesis/intermediate/debate-round-1.md` from the workers' first-pass
+> outputs and returns round-2 prompt fragments. A driver that actually
+> re-dispatches each worker with the round-2 prompt and writes
+> `debate-round-2.md` is a **v2 follow-up** — for now the round-2 prompts
+> are documented and produced as data, and the orchestrator should escalate
+> to the user if a full two-round debate is required.
+
 Round 1 — **opening positions** (parallel):
 
 - Each agent receives the original prompt + a suffix:

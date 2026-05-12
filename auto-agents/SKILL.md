@@ -27,7 +27,7 @@ Stage 0 — Setup        (assets/auth_check.py)   detect host, verify worker CLI
 Stage 1 — Route        (assets/route.py)        classify task, select agents, write route.json
 Stage 2 — Dispatch     (assets/dispatch.py)     spawn worker subprocesses, capture to agents/<name>/
 Stage 3 — Synthesize   (assets/synthesize.py)   vote / debate / meta-synth → synthesis/final.md
-Stage 4 — Hand-off     (inline)                 write hand_off.md, print summary, exit cleanly
+Stage 4 — Hand-off     (assets/handoff.py)      write hand_off.md, print summary, exit cleanly
 ```
 
 Each stage writes a `progress.jsonl` row at start and at completion. Re-running the skill re-reads disk and continues from the last completed micro-step.
