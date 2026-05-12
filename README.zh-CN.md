@@ -7,6 +7,8 @@
 *对主 CLI（`claude` / `codex` / `opencode`）说：* **`挑最合适的 agent 解决`**
 *→ 分类任务 → 派发 worker → 合成 → final.md。*
 
+<img src="docs/hero.png" alt="auto-agents hero" width="480"/>
+
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](#)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-Compatible-D97757.svg)](https://claude.ai/code)

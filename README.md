@@ -7,6 +7,8 @@
 *Tell the host CLI (`claude` / `codex` / `opencode`):* **`use the best agent for this`**
 *→ classify task → fan out to workers → synthesize → final.md.*
 
+<img src="docs/hero.png" alt="auto-agents hero" width="480"/>
+
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](#)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-Compatible-D97757.svg)](https://claude.ai/code)
