@@ -1,0 +1,36 @@
+name: auto-agents
+description: |
+  Multi-CLI router & synthesizer. The CLI that invokes this skill is the host;
+  workers are the other two of {claude, codex, opencode}. Classifies the task,
+  picks one or more agents per agent-matrix, dispatches workers as subprocesses
+  with budget caps, captures stdout/stderr/meta under runs/<task_id>/, and
+  synthesizes one final answer (vote / debate / meta-synth). All state on disk,
+  resume-by-default. Refuses when AUTO_AGENTS_DEPTH >= 1 (recursion guard).
+
+invocation:
+  trigger_examples:
+    - "best CLI to answer this — pick for me"
+    - "brainstorm with all three agents"
+    - "have codex audit what claude just wrote"
+    - "settle this with a debate between the agents"
+  do_not_trigger:
+    - single-CLI tasks where the host can clearly handle it
+    - any nested invocation (env AUTO_AGENTS_DEPTH already set)
+
+inputs:
+  required:
+    - task_description       # free-form prompt the workers will see
+  optional:
+    - mode                   # auto | multi | single:<agent> | dry-run
+    - per_call_cap_usd       # default 0.50
+    - total_cap_usd          # default 2.00
+    - deadline_utc           # ISO-8601; synthesizer skips slow agents if past
+
+outputs:
+  - runs/<task_id>/synthesis/final.md
+  - runs/<task_id>/hand_off.md
+  - runs/<task_id>/audit.jsonl
+
+notes: |
+  Codex-side UI metadata only. Claude Code ignores this file. Keep in sync with
+  the SKILL.md frontmatter when changing trigger phrasing.
