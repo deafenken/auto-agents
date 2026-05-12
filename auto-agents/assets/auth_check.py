@@ -22,29 +22,13 @@ import invoke_claude
 import invoke_codex
 import invoke_opencode
 import progress as P
+import yaml_io
 
 WORKERS = {
     "claude":   invoke_claude,
     "codex":    invoke_codex,
     "opencode": invoke_opencode,
 }
-
-
-def _yaml_dump_task(task: dict) -> str:
-    """Minimal YAML writer; we keep the file plain-text so users can edit it."""
-    lines = []
-    for k, v in task.items():
-        if isinstance(v, dict):
-            lines.append(f"{k}:")
-            for sk, sv in v.items():
-                lines.append(f"  {sk}: {json.dumps(sv) if not isinstance(sv, (int, float, bool)) and sv is not None else sv}")
-        elif isinstance(v, str) and ("\n" in v or len(v) > 100):
-            lines.append(f"{k}: |")
-            for line in v.splitlines():
-                lines.append(f"  {line}")
-        else:
-            lines.append(f"{k}: {json.dumps(v) if isinstance(v, str) else v}")
-    return "\n".join(lines) + "\n"
 
 
 def run_stage0(run_dir: Path, prompt: str, *, mode: str = "auto",
@@ -103,7 +87,7 @@ def run_stage0(run_dir: Path, prompt: str, *, mode: str = "auto",
         "workers_available": workers_available,
         "workers_detail": workers_detail,
     }
-    P.atomic_write_text(run_dir / "task.yaml", _yaml_dump_task(task))
+    P.atomic_write_text(run_dir / "task.yaml", yaml_io.dump(task))
     P.append_progress(run_dir, stage=0, step="write_task_yaml", status="ok")
     return task
 

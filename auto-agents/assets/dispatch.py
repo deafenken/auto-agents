@@ -21,6 +21,7 @@ import invoke_claude
 import invoke_codex
 import invoke_opencode
 import progress as P
+import yaml_io
 
 WORKERS = {
     "claude":   invoke_claude,
@@ -34,21 +35,7 @@ def _read_route(run_dir: Path) -> dict:
 
 
 def _read_prompt(run_dir: Path) -> str:
-    # task.yaml stores prompt as a YAML block; cheaply extract.
-    text = (run_dir / "task.yaml").read_text(encoding="utf-8")
-    out: list[str] = []
-    in_prompt = False
-    for line in text.splitlines():
-        if in_prompt:
-            if line.startswith("  "):
-                out.append(line[2:])
-            elif line.strip() == "":
-                out.append("")
-            else:
-                break
-        elif line.startswith("prompt: |"):
-            in_prompt = True
-    return "\n".join(out).rstrip()
+    return yaml_io.load_path(run_dir / "task.yaml").get("prompt", "")
 
 
 def _archive_prior_attempt(agent_dir: Path) -> None:

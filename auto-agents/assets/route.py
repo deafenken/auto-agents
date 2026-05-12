@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import progress as P
+import yaml_io
 
 # --- Matrix data (mirrors agent-matrix.md) ------------------------------------
 TASK_CLASSES = {
@@ -39,7 +40,8 @@ KEYWORDS = [
                      r"alternatives", r"what could we", r"多个角度", r"头脑风暴"]),
     ("debate",      [r"\bdebate\b", r"\badversarial\b", r"steelman",
                      r"for and against", r"pros and cons", r"辩论"]),
-    ("research",    [r"find papers", r"search the web", r"who (first )?said",
+    ("research",    [r"find papers", r"search the web",
+                     r"who (first )?(said|wrote|proved|discovered|showed|claimed|invented)",
                      r"\bcite\b", r"references", r"prior work"]),
     ("code-write",  [r"\bwrite\b", r"\bimplement\b", r"\badd\b",
                      r"\brefactor\b", r"fix the function", r"修改", r"实现"]),
@@ -117,48 +119,11 @@ def _select_agents(task_class: str, host: str, available: dict[str, bool],
             escalations)
 
 
-def _read_task_yaml(path: Path) -> dict:
-    """Minimal YAML parser for our flat schema."""
-    data: dict = {}
-    current_key = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.startswith("#"):
-            continue
-        if line.startswith("  ") and current_key:
-            sk, _, sv = line.strip().partition(":")
-            sv = sv.strip()
-            if sv in ("true", "false"):
-                data[current_key][sk] = (sv == "true")
-            else:
-                try:
-                    data[current_key][sk] = json.loads(sv)
-                except (json.JSONDecodeError, ValueError):
-                    data[current_key][sk] = sv
-            continue
-        k, _, v = line.partition(":")
-        v = v.strip()
-        if v == "":
-            data[k] = {}
-            current_key = k
-            continue
-        current_key = None
-        if v in ("true", "false"):
-            data[k] = (v == "true")
-        elif v == "null":
-            data[k] = None
-        else:
-            try:
-                data[k] = json.loads(v)
-            except (json.JSONDecodeError, ValueError):
-                data[k] = v
-    return data
-
-
 def run_stage1(run_dir: Path) -> dict:
     P.check_sentinels(run_dir)
     P.write_heartbeat(run_dir, stage=1, step="classify")
 
-    task = _read_task_yaml(run_dir / "task.yaml")
+    task = yaml_io.load_path(run_dir / "task.yaml")
     prompt = task.get("prompt", "")
     host = task["host"]
     mode = task.get("mode", "auto")
